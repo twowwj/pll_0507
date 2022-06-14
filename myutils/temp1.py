@@ -27,7 +27,9 @@ from engine_finetune import train_one_epoch, evaluate
 from torch.nn import DataParallel
 from util.mlogger import create_logger
 
-""" no augmentation of training dataset
+""" Cross Entropy w/ smoothing or soft targets
+
+Hacked together by / Copyright 2021 Ross Wightman
 """
 
 import torch
@@ -138,10 +140,11 @@ def evaluate(data_loader, model, device, logger):
 	model.eval()
 	affectnet_partialY = pickle.load(open(args.labelset, "rb"))
 	label_new_set = {}
-	count =0
+
 	for batch in metric_logger.log_every(data_loader, 10, header, logger=logger):
 		images = batch[0]
 		target = batch[1]
+		index = batch[2]
 		image_name = batch[3][0]
 		images = images.to(device, non_blocking=True)
 		target = target.to(device, non_blocking=True)
@@ -149,23 +152,24 @@ def evaluate(data_loader, model, device, logger):
 		with torch.cuda.amp.autocast():
 			output = model(images)
 			loss = criterion(output, target)
-			acc1, acc2, acc3, acc5 = accuracy(output, target, topk=(1, 2, 3, 5))
-			if acc1 == 0:
-				index_top3 = output.topk(3)[1].cpu().detach().numpy().tolist()
-				label_new_set[image_name] = index_top3[0]
-				count+=1
+			pred = output.cpu().detach().numpy().tolist()
+			pred.topk(2, )
+			acc1, acc2, acc5 = accuracy(output, target, topk=(1, 2, 5))
 
+			# for idx in range(image.shape[0]):
+			# 	md[filenam[idx]] = pred
+
+
+
+		acc1, acc2, acc5 = accuracy(output, target, topk=(1, 2, 5))
 
 		batch_size = images.shape[0]
 		metric_logger.update(loss=loss.item())
 		metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
 		metric_logger.meters['acc2'].update(acc2.item(), n=batch_size)
-		metric_logger.meters['acc3'].update(acc3.item(), n=batch_size)
 		metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
 
 	# gather the stats from all processes
-	with open('/data0/wwang/pll_0507/labelset_rafdb/new_labelset—top3.pkl', 'wb') as f:
-		pickle.dump(label_new_set, f)
 	metric_logger.synchronize_between_processes()
 
 
@@ -173,7 +177,7 @@ def evaluate(data_loader, model, device, logger):
 
 
 def main(args):
-	# a = pickle.load(open('/data0/wwang/pll_0507/labelset_rafdb/22_182.pkl', "rb"))
+
 	device = torch.device(args.device)
 
 	if args.dataset == 'rafdb':
@@ -182,34 +186,27 @@ def main(args):
 	elif args.dataset == 'ferplus':
 		args.nb_classes = 8
 		from datasets.ferplus_base import get_dataset
-	elif args.dataset == 'affectnet7':
-		from datasets.affetnet_base import get_dataset
-		args.nb_classes = 7
-	elif args.dataset == 'affectnet8':
-		from datasets.affetnet_base import get_dataset
-		args.nb_classes = 8
 
-	# dataset_train, dataset_val = get_dataset(args)
-	# sampler_train = torch.utils.data.RandomSampler(dataset_train)
-	# sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-	#
-	# data_loader_train = torch.utils.data.DataLoader(
-	# 	dataset_train, sampler=sampler_train,
-	# 	batch_size=args.batch_size,
-	# 	num_workers=args.num_workers,
-	# 	pin_memory=args.pin_mem,
-	# 	drop_last=True,
-	# )
-	# data_loader_val = torch.utils.data.DataLoader(
-	# 	dataset_val, sampler=sampler_val,
-	# 	batch_size=args.batch_size,
-	# 	num_workers=args.num_workers,
-	# 	pin_memory=args.pin_mem,
-	# 	drop_last=False
-	# )
+	dataset_train, dataset_val = get_dataset(args)
 
-	data_loader_train, data_loader_val = get_dataset(args)
+	sampler_train = torch.utils.data.RandomSampler(dataset_train)
+	sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
+
+	data_loader_train = torch.utils.data.DataLoader(
+		dataset_train, sampler=sampler_train,
+		batch_size=args.batch_size,
+		num_workers=args.num_workers,
+		pin_memory=args.pin_mem,
+		drop_last=True,
+	)
+	data_loader_val = torch.utils.data.DataLoader(
+		dataset_val, sampler=sampler_val,
+		batch_size=args.batch_size,
+		num_workers=args.num_workers,
+		pin_memory=args.pin_mem,
+		drop_last=False
+	)
 	save_path = os.path.join(args.output_dir)
 	if not os.path.exists(save_path):
 		os.makedirs(save_path)
@@ -233,7 +230,24 @@ def main(args):
 	optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
 	misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer,
 					loss_scaler=loss_scaler)
+	#
+	#
+	#
+	# checkpoint = torch.load(args.resume, map_location='cpu')
+	#
+	# print("Load pre-trained checkpoint from: %s" % args.resume)
+	# checkpoint_model = checkpoint['model']
+	# state_dict = model.state_dict()
+	# for k in ['head.weight', 'head.bias']:
+	# 	if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+	# 		print(f"Removing key {k} from pretrained checkpoint")
+	# 		del checkpoint_model[k]
+	#
+	# # interpolate position embedding
+	# interpolate_pos_embed(model, checkpoint_model)
 
+	# load pre-trained model
+	# msg = model.load_state_dict(checkpoint_model, strict=False)
 
 	# test_stats = evaluate(data_loader_val, model, device, logger)
 	test_stats = evaluate(data_loader_train, model, device, logger)
